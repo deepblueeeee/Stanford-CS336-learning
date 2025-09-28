@@ -1,10 +1,26 @@
 import regex as re
+import heapq
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 from assignment1_basics.cs336_basics.pretokenization_example import find_chunk_boundaries
+
+class MaxStr:
+    def __init__(self, s):
+        self.s = s
+
+    def __lt__(self, other):
+        return self.s > other.s
+    
+    def __eq__(self, other):
+        self.s == other.s
+
+    def __repr__(self):
+        return f"MaxStr({self.s!r})"
+
 def train_bpe(input_path:str, vocab_size:int, special_tokens:list[str] = []) -> tuple[list[int,bytes], list[tuple[bytes,bytes]]]:
-    vocab = {}
-    merges = []
-    token_dict = {}
+    vocab = dict()
+    merges = list()
+    token_counts = dict()
+    token_split = dict()
     if vocab_size >= 256:
         #初始化vocab
         for i in range(256 + len(special_tokens)):
@@ -24,64 +40,75 @@ def train_bpe(input_path:str, vocab_size:int, special_tokens:list[str] = []) -> 
                     if sentence != b'':
                         tokens = re.finditer(PAT,sentence.decode())
                         for token in tokens:#token.group(0) -> str encode-> bytes
-                            token_bytes = tuple(bytes([byte]) for byte in token.group(0).encode('utf-8'))
-                            token_dict[token_bytes] = token_dict.get(token_bytes,0) + 1
+                            token_bytes = token.group(0).encode('utf-8')
+                            token_counts[token_bytes] = token_counts.get(token_bytes,0) + 1
+        byte_list = list(bytes([i]) for i in range(256))
+        for token in token_counts:
+            token_split[token] = list(byte_list[i] for i in token)
 
-        #merge
+        pair_counts = dict()
+        bp_location = dict()
+        for token in token_split: #construct pair-counts
+            for index in range(len(token_split[token]) - 1):
+                pair_counts[(token_split[token][index],token_split[token][index+1])] = pair_counts.get((token_split[token][index],token_split[token][index+1]),0) + token_counts[token]
+                bp_location[(token_split[token][index],token_split[token][index+1])] = bp_location.get((token_split[token][index],token_split[token][index+1]),list())+[token]
+
+        max_heap = [(-value, MaxStr(key)) for key,value in pair_counts.items()]#max_heap based on pair_counts
+        heapq.heapify(max_heap)
         times = vocab_size - 256 - len(special_tokens)
         for i in range(times):
-            #init
-            max = 0
-            max_tuple = tuple()
-            pair_counts = {}
-            for token in token_dict: #count
-                for j in range(len(token) - 1):
-                    pair_counts[(token[j],token[j+1])] = pair_counts.get((token[j],token[j+1]),0) + token_dict[token]
-                    if max < pair_counts[(token[j],token[j+1])]:
-                        max = pair_counts[(token[j],token[j+1])]
-                        max_tuple = (token[j],token[j+1])
-                    elif max == pair_counts[(token[j],token[j+1])]:
-                        bytes_current = b''.join((token[j],token[j+1]))
-                        bytes_max = b''.join(max_tuple)
-                        if bytes_max < bytes_current:
-                            max_tuple = (token[j],token[j+1])
-
-            tokens_toberemoved = []
-            tokens_tobeadded = {}
-            for token in token_dict: #renew
-                token_merged = list()
-                value = token_dict[token]
-                sign = 0
-                need_renew = 0
-                for j in range(len(token)):
-                    if sign == 0:
-                        if token[j] == max_tuple[0]:
-                            if j+1 <= len(token) - 1 and token[j+1] == max_tuple[1]:
-                                sign = 1
-                                need_renew = 1
-                            else:
-                                token_merged.append(token[j])
-                        else:
-                            token_merged.append(token[j])
-                    else:
-                        token_merged.append(b''.join(max_tuple))
-                        sign = 0
-                        continue
-                if need_renew == 1:
-                    tokens_toberemoved.append(token)
-                    if token_merged[0] != b''.join(token):
-                        tokens_tobeadded[tuple(token_merged)] = value
+            while True:
+                count, pair = heapq.heappop(max_heap)
+                count = -count
+                pair = pair.s
+                if count == pair_counts.get(pair, 0):
+                    break
+            pair_merged = b''.join(pair)
+            merges.append(pair)
+            vocab[i + 256 + len(special_tokens)] = b''.join(pair)
+            pairs_toBeAdded = set()
+            #renew: 1、pair  2、counts
+            for token in bp_location[pair]:
+                j = 0   #统计新增pair减少pair
+                while j < len(token_split[token]) - 1:
+                    if token_split[token][j] == pair[0] and token_split[token][j + 1] == pair[1]:
+                        token_split[token].pop(j)
+                        token_split[token].pop(j)
+                        token_split[token].insert(j,pair_merged)
+                        #renew pair_counts new = sum(affected_token); old = old - sum(affected_token)
+                        if j - 1 >= 0:
+                            pair_front = (token_split[token][j-1],pair_merged)
+                            pair_counts[pair_front] = pair_counts.get(pair_front,0) + token_counts[token]
+                            bp_location[pair_front] = bp_location.get(pair_front,list())+[token]
+                            pairs_toBeAdded.add(pair_front)
+                            pair_affected = (token_split[token][j-1],pair[0])
+                            pair_counts[pair_affected] -= token_counts[token]
+                            pairs_toBeAdded.add(pair_affected)
+                        if j + 1 <= len(token_split[token]) - 1:
+                            pair_back = (pair_merged,token_split[token][j+1])
+                            pair_counts[pair_back] = pair_counts.get(pair_back,0) + token_counts[token]
+                            bp_location[pair_back] = bp_location.get(pair_back,list())+[token]
+                            pairs_toBeAdded.add(pair_back)
+                            pair_affected = (pair[1],token_split[token][j+1])
+                            pair_counts[pair_affected] -= token_counts[token]
+                            pairs_toBeAdded.add(pair_affected)
+                    j += 1
+            #更新heap
+            for pair_add in pairs_toBeAdded:
+                if pair_counts[pair_add] != 0:
+                    heapq.heappush(max_heap,(-pair_counts[pair_add],MaxStr(pair_add)))
+                else:
+                    pair_counts.pop(pair_add)
+                    bp_location.pop(pair_add)
             
-            for token in tokens_toberemoved:
-                token_dict.pop(token)
-            for token in tokens_tobeadded:
-                token_dict[token] = tokens_tobeadded[token]
-
-            merges.append(max_tuple)
-            vocab[i + 256 + len(special_tokens)] = b''.join(max_tuple)
+            pair_counts.pop(pair)
+            bp_location.pop(pair)
+            #dict(bp:dict(token:index))
+            #wit
             #widely wi id de el ly -> for  {[w,i],[i,d],[d,e],[e,l],[l,y]}  when merge happens,e.g. id -> wi/de   
             # now {[w,i,d],[i,d,e],[e,l],[l,y]} affect nearby only 
             # do not happen across pre-tokens ->  check with every merge? pop()
     return vocab, merges
 
-vocab, merges = train_bpe('data\\TinyStoriesV2-GPT4-valid.txt',2000)
+vocab, merges = train_bpe('data\\TinyStoriesV2-GPT4-valid.txt',5000)
+vocab
