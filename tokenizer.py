@@ -1,5 +1,7 @@
 import regex as re
 import heapq
+import multiprocessing as mp
+from collections import Counter
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 from assignment1_basics.cs336_basics.pretokenization_example import find_chunk_boundaries
 
@@ -15,11 +17,22 @@ class MaxStr:
 
     def __repr__(self):
         return f"MaxStr({self.s!r})"
+    
+def count_tokens(chunk:bytes):
+    counter = Counter()
+    sentences = chunk.decode().split("<|endoftext|>")
+    for sentence in sentences:
+        if sentence != '':
+            tokens = re.finditer(PAT,sentence)
+            for token in tokens:
+                token_bytes = token.group(0).encode('utf-8')
+                counter[token_bytes] += 1
+    return counter
 
 def train_bpe(input_path:str, vocab_size:int, special_tokens:list[str] = []) -> tuple[list[int,bytes], list[tuple[bytes,bytes]]]:
     vocab = dict()
     merges = list()
-    token_counts = dict()
+    token_counts = Counter()
     token_split = dict()
     if vocab_size >= 256:
         #初始化vocab
@@ -30,18 +43,18 @@ def train_bpe(input_path:str, vocab_size:int, special_tokens:list[str] = []) -> 
                 vocab[i] = special_tokens[i - 256].encode('utf-8')
         #pre-tokenize
         with open(input_path, "rb") as f:
-            num_processes = 4
+            num_processes = 8
             boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+            chunks = list()
             f.seek(0)
             for i in range(num_processes):
                 chunk = f.read(boundaries[i+1] - boundaries[i])
-                sentences = chunk.split(b"<|endoftext|>")
-                for sentence in sentences:
-                    if sentence != b'':
-                        tokens = re.finditer(PAT,sentence.decode())
-                        for token in tokens:#token.group(0) -> str encode-> bytes
-                            token_bytes = token.group(0).encode('utf-8')
-                            token_counts[token_bytes] = token_counts.get(token_bytes,0) + 1
+                chunks.append(chunk)
+            with mp.Pool(processes=num_processes) as pool:
+                result = pool.map(count_tokens, chunks)
+            for res in result:
+                token_counts += res
+
         byte_list = list(bytes([i]) for i in range(256))
         for token in token_counts:
             token_split[token] = list(byte_list[i] for i in token)
@@ -110,5 +123,9 @@ def train_bpe(input_path:str, vocab_size:int, special_tokens:list[str] = []) -> 
             # do not happen across pre-tokens ->  check with every merge? pop()
     return vocab, merges
 
-vocab, merges = train_bpe('data\\TinyStoriesV2-GPT4-valid.txt',5000)
-vocab
+if __name__ == '__main__':
+    import time
+    start = time.time()
+    vocab, merges = train_bpe('data\\TinyStoriesV2-GPT4-valid.txt',5000)
+    end = time.time()
+    print(f"running time: {end - start:.4f} s")
