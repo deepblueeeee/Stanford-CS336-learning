@@ -5,6 +5,12 @@ from collections import Counter
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 from assignment1_basics.cs336_basics.pretokenization_example import find_chunk_boundaries
 
+special_tokens_global = None
+
+def init_workers(special_tokens:list):
+    global special_tokens_global
+    special_tokens_global = special_tokens
+
 class MaxStr:
     def __init__(self, s):
         self.s = s
@@ -22,11 +28,15 @@ def count_tokens(chunk:bytes):
     counter = Counter()
     sentences = chunk.decode().split("<|endoftext|>")
     for sentence in sentences:
-        if sentence != '':
-            tokens = re.finditer(PAT,sentence)
-            for token in tokens:
-                token_bytes = token.group(0).encode('utf-8')
-                counter[token_bytes] += 1
+        sentence = sentence.replace('\r\n', '\n')
+        pattern = '|'.join(re.escape(sp_token) for sp_token in special_tokens_global)
+        parts = re.split(pattern,sentence)
+        for part in parts:
+            if part != '':
+                tokens = re.finditer(PAT,part)
+                for token in tokens:
+                    token_bytes = token.group(0).encode('utf-8')
+                    counter[token_bytes] += 1
     return counter
 
 def train_bpe(input_path:str, vocab_size:int, special_tokens:list[str] = []) -> tuple[list[int,bytes], list[tuple[bytes,bytes]]]:
@@ -47,10 +57,10 @@ def train_bpe(input_path:str, vocab_size:int, special_tokens:list[str] = []) -> 
             boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
             chunks = list()
             f.seek(0)
-            for i in range(num_processes):
+            for i in range(len(boundaries) - 1):
                 chunk = f.read(boundaries[i+1] - boundaries[i])
                 chunks.append(chunk)
-            with mp.Pool(processes=num_processes) as pool:
+            with mp.Pool(processes=num_processes, initializer=init_workers, initargs=(special_tokens,)) as pool:
                 result = pool.map(count_tokens, chunks)
             for res in result:
                 token_counts += res
@@ -126,6 +136,8 @@ def train_bpe(input_path:str, vocab_size:int, special_tokens:list[str] = []) -> 
 if __name__ == '__main__':
     import time
     start = time.time()
-    vocab, merges = train_bpe('data\\TinyStoriesV2-GPT4-valid.txt',5000)
+    specialTokens = ['<|endoftext|>']
+    # vocab, merges = train_bpe('data\\TinyStoriesV2-GPT4-train.txt',10000, special_tokens=specialTokens)
+    vocab, merges = train_bpe('S:\Stanford-CS336-learning/assignment1_basics/tests/fixtures/tinystories_sample_5M.txt',500, special_tokens=specialTokens)
     end = time.time()
     print(f"running time: {end - start:.4f} s")
