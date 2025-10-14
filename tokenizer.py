@@ -1,7 +1,9 @@
+from collections.abc import Iterable, Iterator
 import regex as re
 import heapq
 import multiprocessing as mp
 from collections import Counter
+import json
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 from assignment1_basics.cs336_basics.pretokenization_example import find_chunk_boundaries
 
@@ -39,7 +41,7 @@ def count_tokens(chunk:bytes):
                     counter[token_bytes] += 1
     return counter
 
-def train_bpe(input_path:str, vocab_size:int, special_tokens:list[str] = []) -> tuple[list[int,bytes], list[tuple[bytes,bytes]]]:
+def train_bpe(input_path:str, vocab_size:int, special_tokens:list[str] = []) -> tuple[dict[int,bytes], list[tuple[bytes,bytes]]]:
     vocab = dict()
     merges = list()
     token_counts = Counter()
@@ -133,11 +135,70 @@ def train_bpe(input_path:str, vocab_size:int, special_tokens:list[str] = []) -> 
             # do not happen across pre-tokens ->  check with every merge? pop()
     return vocab, merges
 
+class pbe_tokenizer:
+    def __init__(self, vocab, merges, special_tokens = None):
+        self.vocab_encode = {vocab[key]:key for key in vocab}
+        self.vocab_decode = vocab
+        self.merges = merges
+        self.special_tokens = special_tokens
+    @classmethod
+    def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
+        with open(vocab_filepath,'r',encoding='utf-8') as f:
+            vocab_str = json.loads(f.read())
+            vocab = {vocab_str[key]:key.encode('latin1') for key in vocab_str}
+        with open(merges_filepath,'r',encoding='utf-8') as f:
+            merges_str = json.loads(f.read())
+            merges = [(str1.encode('latin1'),str2.encode('latin1')) for str1,str2 in merges_str]
+        return cls(vocab, merges, special_tokens)
+    def encode(self, text: str):
+        res = list()
+        text = text.replace('\r\n', '\n')
+        tokens = re.finditer(PAT,text)
+        for token in tokens:
+            token_bytes = token.group(0).encode('utf-8')
+            if token_bytes in self.special_tokens:
+                res.append(self.vocab_encode[token_bytes])
+            else:
+                while(token_bytes != b''):
+                    i = len(token_bytes)
+                    while i > 0:
+                        token_bytes_slice = token_bytes[0:i]
+                        if token_bytes_slice in self.vocab_encode:
+                            res.append(self.vocab_encode[token_bytes_slice])
+                            token_bytes = token_bytes.replace(token_bytes_slice,b'',1)
+                            break
+                        else:
+                            i -= 1
+        return res
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for text in iterable:
+            yield from self.encode(text)
+    def decode(self, ids: list[int]) -> str:
+        bytes_list = list()
+        for i in ids:
+            bytes_list.append(self.vocab_decode[i])
+        res = b''.join(bytes_list).decode('utf-8')
+        return res
+
 if __name__ == '__main__':
     import time
     start = time.time()
+    
     specialTokens = ['<|endoftext|>']
     # vocab, merges = train_bpe('data\\TinyStoriesV2-GPT4-train.txt',10000, special_tokens=specialTokens)
-    vocab, merges = train_bpe('S:\Stanford-CS336-learning/assignment1_basics/tests/fixtures/tinystories_sample_5M.txt',500, special_tokens=specialTokens)
+    # vocab_str = {vocab[key].decode('latin1'):key for key in vocab}
+    # merges_str = [(bytes1.decode('latin1'),bytes2.decode('latin1')) for bytes1, bytes2 in merges]
+    # with open('data/vocab.json','w',encoding='utf-8') as f:
+    #     json.dump(vocab_str,f)
+    # with open('data/merges.txt','w',encoding='utf-8') as f:
+    #     json.dump(merges_str,f)
+    string = 'Theres no doubt that my mother gives all her love to me. I do believe she is a great person who makes my life beautiful and meaningful.　　She is an easygoing and kind woman with bright eyes and a lovely smile.'
+    tokenzier = pbe_tokenizer.from_files('data/vocab.json','data/merges.txt',specialTokens)
+    with open('data/test.txt', 'r', encoding='utf-8') as f:
+        for ids in tokenzier.encode_iterable(f):
+            res = tokenzier.decode([ids])
+            print(res)
+
     end = time.time()
     print(f"running time: {end - start:.4f} s")
+            
